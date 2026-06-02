@@ -10,12 +10,16 @@ from streamlit_folium import st_folium
 import warnings
 import re
 import unicodedata
+from streamlit_gsheets import GSheetsConnection
 
 # Suppress pandas/pyproj warnings for a cleaner console
 warnings.filterwarnings('ignore')
 
 st.set_page_config(layout="wide", page_title="Ilkhanate Mint Studio")
 st.title("🗺️ Ilkhanate Mint Map Studio")
+
+# Initialize the Google Sheets Cloud Connection Engine
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 def strip_diacritics(text):
     """
@@ -25,6 +29,7 @@ def strip_diacritics(text):
     if not text: return ""
     normalized = unicodedata.normalize('NFKD', str(text))
     stripped = "".join([c for c in normalized if not unicodedata.combining(c)])
+    # Remove typographic notation marks like ayn (‘) or hamza (’)
     clean = re.sub(r"[‘’`´'\"]", "", stripped)
     return clean.strip().lower()
 
@@ -99,49 +104,53 @@ def load_single_kml(file_path):
     gdf.set_crs(epsg=4326, inplace=True)
     return gdf
 
-# --- Persistent App Storage State Initialization ---
+# --- Persistent Data Storage State Initialization ---
 if 'base_regions' not in st.session_state or 'base_mints' not in st.session_state:
     all_data_gdf = load_single_kml("regions.kml")
     if all_data_gdf is not None:
         st.session_state.base_regions = all_data_gdf[all_data_gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
         raw_mints = all_data_gdf[all_data_gdf.geometry.type == 'Point'].copy()
         
-        # Hardcode baseline ordering once alphabetically by normalized text names
+        # Hardcode ordering baseline once alphabetically by normalized clean text names
         if not raw_mints.empty:
             raw_mints['norm_sort'] = raw_mints['Name'].apply(strip_diacritics)
             raw_mints = raw_mints.sort_values('norm_sort').drop(columns=['norm_sort'])
-            # Lock static sequential baseline values permanently
+            # Lock static sequence values permanently for core map dataset items
             raw_mints['Mint_Number'] = range(1, len(raw_mints) + 1)
         st.session_state.base_mints = raw_mints
     else:
         st.session_state.base_regions = None
         st.session_state.base_mints = None
 
-if 'custom_mints_list' not in st.session_state:
-    st.session_state.custom_mints_list = []
-
-# Fetch active dataframes
+# Fetch active baseline copies
 regions_gdf = st.session_state.base_regions.copy() if st.session_state.base_regions is not None else None
 mints_gdf = st.session_state.base_mints.copy() if st.session_state.base_mints is not None else None
 
-# Merge dynamically built custom mint points if present
-if st.session_state.custom_mints_list and mints_gdf is not None:
-    custom_df = gpd.GeoDataFrame(st.session_state.custom_mints_list, geometry='geometry')
-    custom_df.set_crs(epsg=4326, inplace=True)
-    mints_gdf = pd.concat([mints_gdf, custom_df], ignore_index=True)
+# --- Live Cloud Read Connection Layer ---
+try:
+    live_custom_df = conn.read(ttl="1m")
+    if not live_custom_df.empty:
+        live_custom_df['geometry'] = live_custom_df.apply(lambda r: Point(float(r['Longitude']), float(r['Latitude'])), axis=1)
+        custom_gdf = gpd.GeoDataFrame(live_custom_df, geometry='geometry')
+        custom_gdf.set_crs(epsg=4326, inplace=True)
+        
+        # Concat live cloud-injected mints seamlessly with base KML data
+        mints_gdf = pd.concat([mints_gdf, custom_gdf], ignore_index=True)
+except Exception:
+    pass
 
-# Compute safe next automated key index value
+# Determine global automated baseline ID sequence indexing limits
 highest_base_num = int(st.session_state.base_mints['Mint_Number'].max()) if st.session_state.base_mints is not None and not st.session_state.base_mints.empty else 0
-highest_custom_num = max([int(m['Mint_Number']) for m in st.session_state.custom_mints_list]) if st.session_state.custom_mints_list else 0
-next_suggested_num = max(highest_base_num, highest_custom_num) + 1
+highest_live_num = int(live_custom_df['Mint_Number'].max()) if 'live_custom_df' in locals() and not live_custom_df.empty else 0
+next_suggested_num = max(highest_base_num, highest_live_num) + 1
 
-# Sorting helper functions using diacritic stripping
+# Dropdown clean alphabetical indexing helpers
 def get_sorted_dropdown_options(df):
     if df is None or df.empty: return []
     unique_names = [str(n) for n in df['Name'].unique() if n]
     return sorted(unique_names, key=strip_diacritics)
 
-# Define Graphic Map Style Presets with Explicit Typography Rules
+# Graphic Preset Theme Dictionaries with Optimized Typography Directives
 style_options = {
     "Standard (OpenStreetMap)": {
         "tiles": "OpenStreetMap", "attr": None, "css": "",
@@ -198,7 +207,7 @@ with st.sidebar:
     region_color = st.color_picker("Region Border Color", style_preset["r_border"])
     region_fill = st.color_picker("Region Fill Color", style_preset["r_fill"])
 
-    # --- Add New Mint UI Form ---
+    # --- Add New Mint UI Form (Cloud Database Pipeline) ---
     st.markdown("---")
     st.header("➕ Add New Custom Mint")
     with st.form("mint_entry_form", clear_on_submit=True):
@@ -214,27 +223,38 @@ with st.sidebar:
         new_lon = st.number_input("Longitude Coordinate (X):", format="%.6f", value=58.678751)
         new_num = st.number_input("Assigned Static Number (Locked):", value=next_suggested_num, step=1)
         
-        submit_mint = st.form_submit_button("Save and Inject Mint")
+        submit_mint = st.form_submit_button("Save and Inject Mint Permanent")
         if submit_mint and new_name:
-            custom_record = {
-                'Name': new_name, 'Description': '', 'Arabic': new_arabic,
-                'Region': new_region, 'Modern_Country': new_country, 'Turkish': new_turkish,
-                'Mint_Number': int(new_num), 'geometry': Point(new_lon, new_lat)
-            }
-            st.session_state.custom_mints_list.append(custom_record)
-            st.success(f"Successfully recorded '{new_name}' as Mint #{new_num}!")
+            try:
+                current_sheet_df = conn.read()
+            except Exception:
+                current_sheet_df = pd.DataFrame()
+                
+            new_row = pd.DataFrame([{
+                'Name': new_name, 'Arabic': new_arabic, 'Region': new_region,
+                'Modern_Country': new_country, 'Turkish': new_turkish, 
+                'Latitude': float(new_lat), 'Longitude': float(new_lon), 'Mint_Number': int(new_num)
+            }])
+            
+            # Append record and force continuous cloud data rewrite update tracking
+            updated_sheet_df = pd.concat([current_sheet_df, new_row], ignore_index=True)
+            conn.update(data=updated_sheet_df)
+            
+            st.success(f"Successfully committed '{new_name}' to cloud sheet database as Mint #{new_num}!")
             st.rerun()
 
-# --- Map Rendering Pipeline ---
+# --- Main App Logic & Map Rendering ---
 if regions_gdf is not None and mints_gdf is not None:
     if style_preset["css"]:
         st.markdown(f"<style>{style_preset['css']}</style>", unsafe_allow_html=True)
         
+    # Apply spatial relational filtering pipelines
     if selected_regions:
         regions_gdf = regions_gdf[regions_gdf['Name'].isin(selected_regions)]
         if not mints_gdf.empty and not regions_gdf.empty:
             mints_gdf = gpd.sjoin(mints_gdf, regions_gdf, how="inner", predicate="intersects")
     
+    # Map Navigation Boundaries tracking & IndexError Crash Prevention
     if search_mint:
         target_col = 'Name_left' if 'Name_left' in mints_gdf.columns else 'Name'
         search_result = mints_gdf[mints_gdf[target_col] == search_mint]
@@ -242,7 +262,7 @@ if regions_gdf is not None and mints_gdf is not None:
             target_mint = search_result.iloc[0]
             center_y, center_x, zoom_level = target_mint.geometry.y, target_mint.geometry.x, 10 
         else:
-            st.warning(f"Mint '{search_mint}' is hidden by your current Region filters.")
+            st.warning(f"Mint '{search_mint}' is currently hidden by active data filters.")
             bounds = regions_gdf.total_bounds if not regions_gdf.empty else mints_gdf.total_bounds
             center_y, center_x, zoom_level = (bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2, 5
     else:
@@ -251,10 +271,12 @@ if regions_gdf is not None and mints_gdf is not None:
 
     m = folium.Map(location=[center_y, center_x], zoom_start=zoom_level, tiles=style_preset["tiles"], attr=style_preset["attr"])
     
+    # Add Regions Vector Overlays
     if show_regions and not regions_gdf.empty:
         style_function = lambda x: {'color': region_color, 'weight': 1.5, 'fillColor': region_fill, 'fillOpacity': 0.55}
         folium.GeoJson(regions_gdf, style_function=style_function).add_to(m)
         
+    # Add Region Labels
     if show_region_labels and not regions_gdf.empty:
         for _, row in regions_gdf.iterrows():
             r_name_val = row.get('Name_left', row.get('Name', ''))
@@ -265,10 +287,10 @@ if regions_gdf is not None and mints_gdf is not None:
                     icon=DivIcon(class_name="empty", icon_size=(150,36), icon_anchor=(75,18), html=f'<div style="font-size: 14pt; font-weight: bold; color: {style_preset["lbl_color"]}; text-align: center; text-shadow: 0px 0px 4px {style_preset["lbl_halo"]};">{r_name_val}</div>')
                 ).add_to(m)
 
+    # Add Mints Markers Layer
     if show_mints and not mints_gdf.empty:
         skip_cols = ['name', 'name_left', 'name_right', 'geometry', 'index_right', 'description', 'description_left', 'description_right', 'mint_number', 'mint_number_left', 'mint_number_right']
         
-        # Color palettes for markers
         theme_m_bg = "#101D33" if "Light" in selected_style_name else ("#C89D4D" if "Dark" in selected_style_name else "#EA4335")
         theme_m_txt = "#FFFFFF" if "Light" in selected_style_name else ("#101D33" if "Dark" in selected_style_name else "#FFFFFF")
         
@@ -284,7 +306,7 @@ if regions_gdf is not None and mints_gdf is not None:
             popup_html = f"<div style='min-width: 240px;'><h3 style='margin-bottom:8px; border-bottom: 2px solid #333; padding-bottom: 4px;'>{m_name}</h3>"
             popup_html += "<table style='width: 100%; border-collapse: collapse; font-size: 10pt;'>"
             
-            # Append explicit coordinate items
+            # Explicit coordinate row injection metrics
             popup_html += f"<tr><td style='font-weight:700; padding:4px 0; border-bottom:1px solid #eee;'>Longitude</td><td style='text-align:right; padding:4px 0; border-bottom:1px solid #eee;'>{row.geometry.x:.6f}</td></tr>"
             popup_html += f"<tr><td style='font-weight:700; padding:4px 0; border-bottom:1px solid #eee;'>Latitude</td><td style='text-align:right; padding:4px 0; border-bottom:1px solid #eee;'>{row.geometry.y:.6f}</td></tr>"
             
@@ -297,6 +319,7 @@ if regions_gdf is not None and mints_gdf is not None:
             popup_html += "</table></div>"
             popup = folium.Popup(popup_html, max_width=350)
             
+            # Unified crisp single-pass translucent text glow halo CSS blueprint
             html_content = f"""
                 <div style="display: flex; align-items: center; gap: 4px;">
                     <div style="background-color: {bg_color}; color: {text_color}; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 8pt; font-weight: bold; box-shadow: 1px 1px 3px rgba(0,0,0,0.4); flex-shrink: 0; z-index: 999;">
@@ -316,7 +339,7 @@ if regions_gdf is not None and mints_gdf is not None:
             
     st_folium(m, width=1200, height=750, returned_objects=[])
     
-# --- EXPORT AND DOWNLOAD ENGINE ---
+    # --- Data Export & Download Infrastructure Engine ---
     st.markdown("---")
     btn_col1, btn_col2 = st.columns(2)
     
@@ -337,27 +360,27 @@ if regions_gdf is not None and mints_gdf is not None:
             num_src = 'Mint_Number_left' if 'Mint_Number_left' in mints_gdf.columns else 'Mint_Number'
             name_src = 'Name_left' if 'Name_left' in mints_gdf.columns else 'Name'
             
-            # 1. Grab the absolute true mathematical coordinates from the map geometry
+            # Map single absolute geographic coordinates directly from geometry vectors
             export_df['Mint Number'] = mints_gdf[num_src]
             export_df['Mint Name'] = mints_gdf[name_src]
             export_df['Longitude'] = mints_gdf.geometry.x
             export_df['Latitude'] = mints_gdf.geometry.y
             
-            # FIXED: Added 'latitude', 'longitude', and 'longtitude' to the skip list 
-            # to prevent custom text fields from overwriting or duplicating true coordinates.
+            # Bypass any corruptive data-entry string fields with absolute coordinate masks
             export_skip_keys = [
                 'name', 'name_left', 'name_right', 'geometry', 'index_right', 
                 'description', 'description_left', 'description_right', 
                 'mint_number', 'mint_number_left', 'mint_number_right', 'norm_sort',
                 'latitude', 'longitude', 'longtitude'
             ]
-            
             for col in mints_gdf.columns:
                 if col.lower() not in export_skip_keys:
                     clean_col_title = col.replace('_', ' ').title()
                     export_df[clean_col_title] = mints_gdf[col]
             
             export_df = export_df.sort_values('Mint Number')
+            
+            # Compress and bake structural data modifications straight to raw binary UTF-8 with BOM
             csv_payload_bytes = export_df.to_csv(index=False).encode('utf-8-sig')
             
             st.download_button(
