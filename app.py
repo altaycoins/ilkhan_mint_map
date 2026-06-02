@@ -29,7 +29,6 @@ def strip_diacritics(text):
     if not text: return ""
     normalized = unicodedata.normalize('NFKD', str(text))
     stripped = "".join([c for c in normalized if not unicodedata.combining(c)])
-    # Remove typographic notation marks like ayn (‘) or hamza (’)
     clean = re.sub(r"[‘’`´'\"]", "", stripped)
     return clean.strip().lower()
 
@@ -115,7 +114,6 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         if not raw_mints.empty:
             raw_mints['norm_sort'] = raw_mints['Name'].apply(strip_diacritics)
             raw_mints = raw_mints.sort_values('norm_sort').drop(columns=['norm_sort'])
-            # Lock static sequence values permanently for core map dataset items
             raw_mints['Mint_Number'] = range(1, len(raw_mints) + 1)
         st.session_state.base_mints = raw_mints
     else:
@@ -133,13 +131,11 @@ try:
         live_custom_df['geometry'] = live_custom_df.apply(lambda r: Point(float(r['Longitude']), float(r['Latitude'])), axis=1)
         custom_gdf = gpd.GeoDataFrame(live_custom_df, geometry='geometry')
         custom_gdf.set_crs(epsg=4326, inplace=True)
-        
-        # Concat live cloud-injected mints seamlessly with base KML data
         mints_gdf = pd.concat([mints_gdf, custom_gdf], ignore_index=True)
 except Exception:
     pass
 
-# Determine global automated baseline ID sequence indexing limits
+# Determine global sequence indexing limits
 highest_base_num = int(st.session_state.base_mints['Mint_Number'].max()) if st.session_state.base_mints is not None and not st.session_state.base_mints.empty else 0
 highest_live_num = int(live_custom_df['Mint_Number'].max()) if 'live_custom_df' in locals() and not live_custom_df.empty else 0
 next_suggested_num = max(highest_base_num, highest_live_num) + 1
@@ -150,7 +146,7 @@ def get_sorted_dropdown_options(df):
     unique_names = [str(n) for n in df['Name'].unique() if n]
     return sorted(unique_names, key=strip_diacritics)
 
-# Graphic Preset Theme Dictionaries with Optimized Typography Directives
+# Theme Style Presets
 style_options = {
     "Standard (OpenStreetMap)": {
         "tiles": "OpenStreetMap", "attr": None, "css": "",
@@ -199,6 +195,8 @@ with st.sidebar:
     show_regions = st.checkbox("Show Region Borders", value=False)
     show_region_labels = st.checkbox("Show Region Names", value=False)
     show_mints = st.checkbox("Show Mints", value=True)
+    # NEW COMPONENT TOGGLE BUTTON
+    show_mint_names = st.checkbox("Show Mint Names next to Numbers", value=True)
     
     st.header("🎨 Map Styling")
     selected_style_name = st.selectbox("Base Map Style Preset", list(style_options.keys()))
@@ -207,7 +205,7 @@ with st.sidebar:
     region_color = st.color_picker("Region Border Color", style_preset["r_border"])
     region_fill = st.color_picker("Region Fill Color", style_preset["r_fill"])
 
-    # --- Add New Mint UI Form (Cloud Database Pipeline) ---
+    # --- Add New Mint UI Form ---
     st.markdown("---")
     st.header("➕ Add New Custom Mint")
     with st.form("mint_entry_form", clear_on_submit=True):
@@ -236,10 +234,8 @@ with st.sidebar:
                 'Latitude': float(new_lat), 'Longitude': float(new_lon), 'Mint_Number': int(new_num)
             }])
             
-            # Append record and force continuous cloud data rewrite update tracking
             updated_sheet_df = pd.concat([current_sheet_df, new_row], ignore_index=True)
             conn.update(data=updated_sheet_df)
-            
             st.success(f"Successfully committed '{new_name}' to cloud sheet database as Mint #{new_num}!")
             st.rerun()
 
@@ -248,13 +244,11 @@ if regions_gdf is not None and mints_gdf is not None:
     if style_preset["css"]:
         st.markdown(f"<style>{style_preset['css']}</style>", unsafe_allow_html=True)
         
-    # Apply spatial relational filtering pipelines
     if selected_regions:
         regions_gdf = regions_gdf[regions_gdf['Name'].isin(selected_regions)]
         if not mints_gdf.empty and not regions_gdf.empty:
             mints_gdf = gpd.sjoin(mints_gdf, regions_gdf, how="inner", predicate="intersects")
     
-    # Map Navigation Boundaries tracking & IndexError Crash Prevention
     if search_mint:
         target_col = 'Name_left' if 'Name_left' in mints_gdf.columns else 'Name'
         search_result = mints_gdf[mints_gdf[target_col] == search_mint]
@@ -271,12 +265,10 @@ if regions_gdf is not None and mints_gdf is not None:
 
     m = folium.Map(location=[center_y, center_x], zoom_start=zoom_level, tiles=style_preset["tiles"], attr=style_preset["attr"])
     
-    # Add Regions Vector Overlays
     if show_regions and not regions_gdf.empty:
         style_function = lambda x: {'color': region_color, 'weight': 1.5, 'fillColor': region_fill, 'fillOpacity': 0.55}
         folium.GeoJson(regions_gdf, style_function=style_function).add_to(m)
         
-    # Add Region Labels
     if show_region_labels and not regions_gdf.empty:
         for _, row in regions_gdf.iterrows():
             r_name_val = row.get('Name_left', row.get('Name', ''))
@@ -287,7 +279,6 @@ if regions_gdf is not None and mints_gdf is not None:
                     icon=DivIcon(class_name="empty", icon_size=(150,36), icon_anchor=(75,18), html=f'<div style="font-size: 14pt; font-weight: bold; color: {style_preset["lbl_color"]}; text-align: center; text-shadow: 0px 0px 4px {style_preset["lbl_halo"]};">{r_name_val}</div>')
                 ).add_to(m)
 
-    # Add Mints Markers Layer
     if show_mints and not mints_gdf.empty:
         skip_cols = ['name', 'name_left', 'name_right', 'geometry', 'index_right', 'description', 'description_left', 'description_right', 'mint_number', 'mint_number_left', 'mint_number_right']
         
@@ -305,8 +296,6 @@ if regions_gdf is not None and mints_gdf is not None:
             # Popup Grid Table Builder
             popup_html = f"<div style='min-width: 240px;'><h3 style='margin-bottom:8px; border-bottom: 2px solid #333; padding-bottom: 4px;'>{m_name}</h3>"
             popup_html += "<table style='width: 100%; border-collapse: collapse; font-size: 10pt;'>"
-            
-            # Explicit coordinate row injection metrics
             popup_html += f"<tr><td style='font-weight:700; padding:4px 0; border-bottom:1px solid #eee;'>Longitude</td><td style='text-align:right; padding:4px 0; border-bottom:1px solid #eee;'>{row.geometry.x:.6f}</td></tr>"
             popup_html += f"<tr><td style='font-weight:700; padding:4px 0; border-bottom:1px solid #eee;'>Latitude</td><td style='text-align:right; padding:4px 0; border-bottom:1px solid #eee;'>{row.geometry.y:.6f}</td></tr>"
             
@@ -315,19 +304,22 @@ if regions_gdf is not None and mints_gdf is not None:
                     clean_label = col_name.replace('_', ' ').title()
                     popup_html += f"<tr><td style='font-weight:700; padding: 4px 10px 4px 0; border-bottom: 1px solid #eee;'>{clean_label}</td>"
                     popup_html += f"<td style='padding: 4px 0; border-bottom: 1px solid #eee; text-align: right;'>{val}</td></tr>"
-            
             popup_html += "</table></div>"
             popup = folium.Popup(popup_html, max_width=350)
             
-            # Unified crisp single-pass translucent text glow halo CSS blueprint
+            # CONDITIONAL RENDERING BLUEPRINT: Strips text element out if user toggles checkbox off
+            text_element_html = f"""
+                <div style="font-size: 11pt; color: {style_preset['lbl_color']}; font-weight: 700; text-shadow: 0px 0px 4px {style_preset['lbl_halo']}; white-space: nowrap;">
+                    {m_name}
+                </div>
+            """ if show_mint_names else ""
+            
             html_content = f"""
                 <div style="display: flex; align-items: center; gap: 4px;">
                     <div style="background-color: {bg_color}; color: {text_color}; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 8pt; font-weight: bold; box-shadow: 1px 1px 3px rgba(0,0,0,0.4); flex-shrink: 0; z-index: 999;">
                         {mint_num}
                     </div>
-                    <div style="font-size: 11pt; color: {style_preset['lbl_color']}; font-weight: 700; text-shadow: 0px 0px 4px {style_preset['lbl_halo']}; white-space: nowrap;">
-                        {m_name}
-                    </div>
+                    {text_element_html}
                 </div>
             """
             
@@ -339,7 +331,7 @@ if regions_gdf is not None and mints_gdf is not None:
             
     st_folium(m, width=1200, height=750, returned_objects=[])
     
-    # --- Data Export & Download Infrastructure Engine ---
+    # --- Data Export Engines ---
     st.markdown("---")
     btn_col1, btn_col2 = st.columns(2)
     
@@ -360,13 +352,11 @@ if regions_gdf is not None and mints_gdf is not None:
             num_src = 'Mint_Number_left' if 'Mint_Number_left' in mints_gdf.columns else 'Mint_Number'
             name_src = 'Name_left' if 'Name_left' in mints_gdf.columns else 'Name'
             
-            # Map single absolute geographic coordinates directly from geometry vectors
             export_df['Mint Number'] = mints_gdf[num_src]
             export_df['Mint Name'] = mints_gdf[name_src]
             export_df['Longitude'] = mints_gdf.geometry.x
             export_df['Latitude'] = mints_gdf.geometry.y
             
-            # Bypass any corruptive data-entry string fields with absolute coordinate masks
             export_skip_keys = [
                 'name', 'name_left', 'name_right', 'geometry', 'index_right', 
                 'description', 'description_left', 'description_right', 
@@ -379,8 +369,6 @@ if regions_gdf is not None and mints_gdf is not None:
                     export_df[clean_col_title] = mints_gdf[col]
             
             export_df = export_df.sort_values('Mint Number')
-            
-            # Compress and bake structural data modifications straight to raw binary UTF-8 with BOM
             csv_payload_bytes = export_df.to_csv(index=False).encode('utf-8-sig')
             
             st.download_button(
