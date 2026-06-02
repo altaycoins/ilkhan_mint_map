@@ -297,7 +297,6 @@ if regions_gdf is not None and mints_gdf is not None:
             popup_html += "</table></div>"
             popup = folium.Popup(popup_html, max_width=350)
             
-            # FIXED HTML CONTENT: Crisp typography with alpha halos to prevent blur blocks
             html_content = f"""
                 <div style="display: flex; align-items: center; gap: 4px;">
                     <div style="background-color: {bg_color}; color: {text_color}; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 8pt; font-weight: bold; box-shadow: 1px 1px 3px rgba(0,0,0,0.4); flex-shrink: 0; z-index: 999;">
@@ -317,6 +316,54 @@ if regions_gdf is not None and mints_gdf is not None:
             
     st_folium(m, width=1200, height=750, returned_objects=[])
     
+# --- EXPORT AND DOWNLOAD ENGINE ---
     st.markdown("---")
-    map_html = m.get_root().render()
-    st.download_button("Download Standalone Map (HTML)", data=map_html, file_name="styled_ilkhans_map.html", mime="text/html")
+    btn_col1, btn_col2 = st.columns(2)
+    
+    with btn_col1:
+        map_html = m.get_root().render()
+        st.download_button(
+            label="📥 Download Standalone Map (HTML) for High-Res Screenshots", 
+            data=map_html, 
+            file_name="styled_ilkhans_map.html", 
+            mime="text/html",
+            use_container_width=True
+        )
+        
+    with btn_col2:
+        if not mints_gdf.empty:
+            export_df = pd.DataFrame()
+            
+            num_src = 'Mint_Number_left' if 'Mint_Number_left' in mints_gdf.columns else 'Mint_Number'
+            name_src = 'Name_left' if 'Name_left' in mints_gdf.columns else 'Name'
+            
+            # 1. Grab the absolute true mathematical coordinates from the map geometry
+            export_df['Mint Number'] = mints_gdf[num_src]
+            export_df['Mint Name'] = mints_gdf[name_src]
+            export_df['Longitude'] = mints_gdf.geometry.x
+            export_df['Latitude'] = mints_gdf.geometry.y
+            
+            # FIXED: Added 'latitude', 'longitude', and 'longtitude' to the skip list 
+            # to prevent custom text fields from overwriting or duplicating true coordinates.
+            export_skip_keys = [
+                'name', 'name_left', 'name_right', 'geometry', 'index_right', 
+                'description', 'description_left', 'description_right', 
+                'mint_number', 'mint_number_left', 'mint_number_right', 'norm_sort',
+                'latitude', 'longitude', 'longtitude'
+            ]
+            
+            for col in mints_gdf.columns:
+                if col.lower() not in export_skip_keys:
+                    clean_col_title = col.replace('_', ' ').title()
+                    export_df[clean_col_title] = mints_gdf[col]
+            
+            export_df = export_df.sort_values('Mint Number')
+            csv_payload_bytes = export_df.to_csv(index=False).encode('utf-8-sig')
+            
+            st.download_button(
+                label="📊 Download Mint Catalog Data Spreadsheet (CSV)",
+                data=csv_payload_bytes,
+                file_name="ilkhanate_mints_catalog.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
