@@ -5,4 +5,4 @@ folium
 streamlit-folium
 shapely
 pandas
-streamlit-gsheets
+st-gsheets-connection
