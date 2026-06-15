@@ -48,7 +48,7 @@ def parse_kml_coordinates(coord_text):
 
 @st.cache_data
 def load_single_kml(file_path):
-    """Parses a single KML containing both regions and mints, preserving ExtendedData."""
+    """Parses a single KML containing regions, preserving ExtendedData."""
     if not os.path.exists(file_path):
         st.error(f"File not found: {file_path}. Please ensure 'regions.kml' is in the same folder.")
         return None
@@ -72,7 +72,7 @@ def load_single_kml(file_path):
         
         row_data = {'Name': name, 'Description': desc}
         
-        # Pull custom metadata columns (Arabic, Modern Country, etc.)
+        # Pull custom metadata columns
         ext_data = placemark.find('kml:ExtendedData', ns)
         if ext_data is not None:
             for data_node in ext_data.findall('kml:Data', ns):
@@ -103,22 +103,55 @@ def load_single_kml(file_path):
     gdf.set_crs(epsg=4326, inplace=True)
     return gdf
 
+
 # --- Persistent Data Storage State Initialization ---
 if 'base_regions' not in st.session_state or 'base_mints' not in st.session_state:
+    
+    # 1. Load ONLY the Polygons (Regions) from the KML
     all_data_gdf = load_single_kml("regions.kml")
     if all_data_gdf is not None:
         st.session_state.base_regions = all_data_gdf[all_data_gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])].copy()
-        raw_mints = all_data_gdf[all_data_gdf.geometry.type == 'Point'].copy()
-        
-        # Hardcode ordering baseline once alphabetically by normalized clean text names
-        if not raw_mints.empty:
-            raw_mints['norm_sort'] = raw_mints['Name'].apply(strip_diacritics)
-            raw_mints = raw_mints.sort_values('norm_sort').drop(columns=['norm_sort'])
-            raw_mints['Mint_Number'] = range(1, len(raw_mints) + 1)
-        st.session_state.base_mints = raw_mints
     else:
         st.session_state.base_regions = None
+
+    # 2. Load the Mints from the CSV files
+    try:
+        # Load Category 1 & 2 and Category 3 CSVs
+        df1 = pd.read_csv("ilkhan mints - Category 1 and 2 - Known mints.csv")
+        df2 = pd.read_csv("ilkhan mints - Category 3 - Known mint but misassigned.csv")
+        
+        # Combine the sheets
+        raw_mints_df = pd.concat([df1, df2], ignore_index=True)
+        
+        # Standardize the unnamed column (Column B) to 'Name' to match your app's logic
+        if 'Unnamed: 1' in raw_mints_df.columns:
+            raw_mints_df.rename(columns={'Unnamed: 1': 'Name'}, inplace=True)
+            
+        # Map the 'Number' column to 'Mint_Number' so the rest of your app works seamlessly
+        if 'Number' in raw_mints_df.columns:
+            raw_mints_df.rename(columns={'Number': 'Mint_Number'}, inplace=True)
+            
+        # Drop rows that don't have coordinates (otherwise the map breaks)
+        raw_mints_df = raw_mints_df.dropna(subset=['° N (Latitude)', '° E (Longitude)'])
+        
+        # Convert to GeoDataFrame
+        raw_mints_gdf = gpd.GeoDataFrame(
+            raw_mints_df, 
+            geometry=gpd.points_from_xy(raw_mints_df['° E (Longitude)'], raw_mints_df['° N (Latitude)']),
+            crs="EPSG:4326"
+        )
+        
+        # Apply your baseline sorting
+        if not raw_mints_gdf.empty:
+            raw_mints_gdf['norm_sort'] = raw_mints_gdf['Name'].apply(strip_diacritics)
+            raw_mints_gdf = raw_mints_gdf.sort_values('norm_sort').drop(columns=['norm_sort'])
+            
+        st.session_state.base_mints = raw_mints_gdf
+        
+    except Exception as e:
+        st.error(f"Error loading CSV mint data: {e}")
         st.session_state.base_mints = None
+
 
 # Fetch active baseline copies
 regions_gdf = st.session_state.base_regions.copy() if st.session_state.base_regions is not None else None
@@ -135,15 +168,19 @@ try:
 except Exception:
     pass
 
-# Determine global sequence indexing limits
-highest_base_num = int(st.session_state.base_mints['Mint_Number'].max()) if st.session_state.base_mints is not None and not st.session_state.base_mints.empty else 0
+# Determine global sequence indexing limits safely
+try:
+    highest_base_num = int(pd.to_numeric(st.session_state.base_mints['Mint_Number'], errors='coerce').max()) if st.session_state.base_mints is not None and not st.session_state.base_mints.empty else 0
+except Exception:
+    highest_base_num = 0
+
 highest_live_num = int(live_custom_df['Mint_Number'].max()) if 'live_custom_df' in locals() and not live_custom_df.empty else 0
 next_suggested_num = max(highest_base_num, highest_live_num) + 1
 
 # Dropdown clean alphabetical indexing helpers
 def get_sorted_dropdown_options(df):
     if df is None or df.empty: return []
-    unique_names = [str(n) for n in df['Name'].unique() if n]
+    unique_names = [str(n) for n in df['Name'].unique() if pd.notna(n)]
     return sorted(unique_names, key=strip_diacritics)
 
 # Theme Style Presets
@@ -195,7 +232,6 @@ with st.sidebar:
     show_regions = st.checkbox("Show Region Borders", value=False)
     show_region_labels = st.checkbox("Show Region Names", value=False)
     show_mints = st.checkbox("Show Mints", value=True)
-    # NEW COMPONENT TOGGLE BUTTON
     show_mint_names = st.checkbox("Show Mint Names next to Numbers", value=True)
     
     st.header("🎨 Map Styling")
@@ -280,40 +316,53 @@ if regions_gdf is not None and mints_gdf is not None:
                 ).add_to(m)
 
     if show_mints and not mints_gdf.empty:
-        skip_cols = ['name', 'name_left', 'name_right', 'geometry', 'index_right', 'description', 'description_left', 'description_right', 'mint_number', 'mint_number_left', 'mint_number_right']
-        
         theme_m_bg = "#101D33" if "Light" in selected_style_name else ("#C89D4D" if "Dark" in selected_style_name else "#EA4335")
         theme_m_txt = "#FFFFFF" if "Light" in selected_style_name else ("#101D33" if "Dark" in selected_style_name else "#FFFFFF")
         
         for _, row in mints_gdf.iterrows():
-            m_name = str(row.get('Name_left', row.get('Name', '')))
+            m_name = str(row.get('Name_left', row.get('Name', ''))).title()
+            
+            # Grab the assigned Mint_Number
             mint_num = str(row.get('Mint_Number_left', row.get('Mint_Number', '•')))
             
-            is_searched = (m_name == search_mint)
+            # Remove decimals if the number imported as a float (e.g., '1.0' -> '1')
+            if mint_num.endswith('.0'): 
+                mint_num = mint_num[:-2]
+            
+            is_searched = (m_name.lower() == search_mint.lower() if search_mint else False)
             bg_color = "#2072B2" if is_searched else theme_m_bg
             text_color = "#FFFFFF" if is_searched else theme_m_txt
             
-            # Popup Grid Table Builder
-            popup_html = f"<div style='min-width: 240px;'><h3 style='margin-bottom:8px; border-bottom: 2px solid #333; padding-bottom: 4px;'>{m_name}</h3>"
+            # --- Build the specific Popup Table ---
+            popup_html = f"<div style='min-width: 280px;'><h3 style='margin-bottom:8px; border-bottom: 2px solid #333; padding-bottom: 4px;'>{m_name}</h3>"
             popup_html += "<table style='width: 100%; border-collapse: collapse; font-size: 10pt;'>"
-            popup_html += f"<tr><td style='font-weight:700; padding:4px 0; border-bottom:1px solid #eee;'>Longitude</td><td style='text-align:right; padding:4px 0; border-bottom:1px solid #eee;'>{row.geometry.x:.6f}</td></tr>"
-            popup_html += f"<tr><td style='font-weight:700; padding:4px 0; border-bottom:1px solid #eee;'>Latitude</td><td style='text-align:right; padding:4px 0; border-bottom:1px solid #eee;'>{row.geometry.y:.6f}</td></tr>"
             
-            for col_name, val in row.items():
-                if col_name.lower() not in skip_cols and pd.notna(val) and str(val).strip() != "":
-                    clean_label = col_name.replace('_', ' ').title()
-                    popup_html += f"<tr><td style='font-weight:700; padding: 4px 10px 4px 0; border-bottom: 1px solid #eee;'>{clean_label}</td>"
+            # Fields you explicitly requested to show
+            display_fields = {
+                'Region': row.get('Region', ''),
+                'Modern Country': row.get('Modern Country', ''),
+                'Transliteration': row.get('Transliteration', ''),
+                'Turkish': row.get('Turkish', ''),
+                'Arabic': row.get('Arabic', ''),
+                'Comments': row.get('Comments', '')
+            }
+            
+            for clean_label, val in display_fields.items():
+                if pd.notna(val) and str(val).strip() != "":
+                    popup_html += f"<tr><td style='font-weight:700; padding: 4px 10px 4px 0; border-bottom: 1px solid #eee; width: 40%;'>{clean_label}</td>"
                     popup_html += f"<td style='padding: 4px 0; border-bottom: 1px solid #eee; text-align: right;'>{val}</td></tr>"
+                    
             popup_html += "</table></div>"
             popup = folium.Popup(popup_html, max_width=350)
             
-            # CONDITIONAL RENDERING BLUEPRINT: Strips text element out if user toggles checkbox off
+            # Text element toggled by the user
             text_element_html = f"""
                 <div style="font-size: 11pt; color: {style_preset['lbl_color']}; font-weight: 700; text-shadow: 0px 0px 4px {style_preset['lbl_halo']}; white-space: nowrap;">
                     {m_name}
                 </div>
             """ if show_mint_names else ""
             
+            # Construct the Icon with the Number inside
             html_content = f"""
                 <div style="display: flex; align-items: center; gap: 4px;">
                     <div style="background-color: {bg_color}; color: {text_color}; border-radius: 50%; width: 22px; height: 22px; display: flex; align-items: center; justify-content: center; font-size: 8pt; font-weight: bold; box-shadow: 1px 1px 3px rgba(0,0,0,0.4); flex-shrink: 0; z-index: 999;">
