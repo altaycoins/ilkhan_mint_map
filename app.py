@@ -15,12 +15,10 @@ from streamlit_gsheets import GSheetsConnection
 # Suppress pandas/pyproj warnings for a cleaner console
 warnings.filterwarnings('ignore')
 
+# Set page to wide mode to maximize map area
 st.set_page_config(layout="wide", page_title="Ilkhanate Mint Studio")
-st.title("🗺️ Ilkhanate Mint Map Studio")
 
 # Initialize the Google Sheets Cloud Connection Engine
-# Note: Because you are configuring [connections.gsheets] in your secrets, 
-# this will automatically authenticate.
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def strip_diacritics(text):
@@ -28,7 +26,7 @@ def strip_diacritics(text):
     Decomposes special transliteration marks (ā, ī, ū, ṣ, ḥ, etc.) 
     into standard characters for smooth A-Z dropdown sorting.
     """
-    if not text: return ""
+    if not text or pd.isna(text): return ""
     normalized = unicodedata.normalize('NFKD', str(text))
     stripped = "".join([c for c in normalized if not unicodedata.combining(c)])
     clean = re.sub(r"[‘’`´'\"]", "", stripped)
@@ -123,8 +121,10 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         # Read the sheet with a 10-minute cache to prevent hitting API rate limits
         raw_mints_df = conn.read(spreadsheet=sheet_url, ttl="10m")
         
-        # Standardize the unnamed column (Column B) to 'Name' to match your app's logic
-        if 'Unnamed: 1' in raw_mints_df.columns:
+        # Override the primary 'Name' column with the values from 'Transliteration'
+        if 'Transliteration' in raw_mints_df.columns:
+            raw_mints_df['Name'] = raw_mints_df['Transliteration']
+        elif 'Unnamed: 1' in raw_mints_df.columns:
             raw_mints_df.rename(columns={'Unnamed: 1': 'Name'}, inplace=True)
             
         # Map the 'Number' column to 'Mint_Number' so the rest of your app works seamlessly
@@ -143,7 +143,8 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
             crs="EPSG:4326"
         )
         
-        # Apply your baseline sorting
+        # Apply your baseline sorting. This strips diacritics ONLY for sorting purposes, 
+        # meaning "Ābārān" is treated as "abaran" internally, making dropdowns strictly A-Z.
         if not raw_mints_gdf.empty:
             raw_mints_gdf['norm_sort'] = raw_mints_gdf['Name'].apply(strip_diacritics)
             raw_mints_gdf = raw_mints_gdf.sort_values('norm_sort').drop(columns=['norm_sort'])
@@ -198,6 +199,9 @@ style_options = {
 
 # --- UI Sidebar ---
 with st.sidebar:
+    st.title("🗺️ Ilkhanate Mint Map Studio")
+    st.markdown("---")
+    
     st.header("🔍 Search & Filter")
     
     search_mint = None
@@ -269,7 +273,8 @@ if regions_gdf is not None and mints_gdf is not None:
         theme_m_txt = "#FFFFFF" if "Light" in selected_style_name else ("#101D33" if "Dark" in selected_style_name else "#FFFFFF")
         
         for _, row in mints_gdf.iterrows():
-            m_name = str(row.get('Name_left', row.get('Name', ''))).title()
+            # Grab the name directly (without .title() to preserve exact transliteration casing like Lu'lu'a)
+            m_name = str(row.get('Name_left', row.get('Name', '')))
             
             # Grab the assigned Mint_Number
             mint_num = str(row.get('Mint_Number_left', row.get('Mint_Number', '•')))
@@ -288,6 +293,7 @@ if regions_gdf is not None and mints_gdf is not None:
             
             # Fields you explicitly requested to show
             display_fields = {
+                'Number': mint_num,
                 'Region': row.get('Region', ''),
                 'Modern Country': row.get('Modern Country', ''),
                 'Transliteration': row.get('Transliteration', ''),
@@ -327,7 +333,8 @@ if regions_gdf is not None and mints_gdf is not None:
                 popup=popup
             ).add_to(m)
             
-    st_folium(m, width=1200, height=750, returned_objects=[])
+    # Make the map take up the full container width dynamically and increase height
+    st_folium(m, use_container_width=True, height=800, returned_objects=[])
     
     # --- Data Export Engines ---
     st.markdown("---")
