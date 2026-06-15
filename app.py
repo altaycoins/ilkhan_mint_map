@@ -114,15 +114,18 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
     else:
         st.session_state.base_regions = None
 
-    # 2. Load the Mints from the CSV files
+    # 2. Load the Mints directly from your live Google Sheet
     try:
-        # Load Category 1 & 2 and Category 3 CSVs
-        df1 = pd.read_csv("ilkhan mints - Category 1 and 2 - Known mints.csv")
-        df2 = pd.read_csv("ilkhan mints - Category 3 - Known mint but misassigned.csv")
+        sheet_url = "https://docs.google.com/spreadsheets/d/1ngDmTk-E8CoafGDDxeKiNmg65w6RswOgUTsqifNexgg/edit?gid=0#gid=0"
         
-        # Combine the sheets
-        raw_mints_df = pd.concat([df1, df2], ignore_index=True)
+        # Read the first tab (gid=0) using your existing Streamlit connection
+        # ttl="10m" caches the data for 10 minutes so it doesn't drain your API quota on every click
+        raw_mints_df = conn.read(spreadsheet=sheet_url, ttl="10m")
         
+        # If your Category 3 mints are on a second tab, you can read and merge them like this:
+        # df2 = conn.read(spreadsheet=sheet_url, worksheet="Name_of_Second_Tab", ttl="10m")
+        # raw_mints_df = pd.concat([raw_mints_df, df2], ignore_index=True)
+
         # Standardize the unnamed column (Column B) to 'Name' to match your app's logic
         if 'Unnamed: 1' in raw_mints_df.columns:
             raw_mints_df.rename(columns={'Unnamed: 1': 'Name'}, inplace=True)
@@ -134,14 +137,14 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         # Drop rows that don't have coordinates (otherwise the map breaks)
         raw_mints_df = raw_mints_df.dropna(subset=['° N (Latitude)', '° E (Longitude)'])
         
-        # Convert to GeoDataFrame
+        # Convert the standard pandas DataFrame to a GeoDataFrame
         raw_mints_gdf = gpd.GeoDataFrame(
             raw_mints_df, 
             geometry=gpd.points_from_xy(raw_mints_df['° E (Longitude)'], raw_mints_df['° N (Latitude)']),
             crs="EPSG:4326"
         )
         
-        # Apply your baseline sorting
+        # Apply your baseline alphabetical sorting
         if not raw_mints_gdf.empty:
             raw_mints_gdf['norm_sort'] = raw_mints_gdf['Name'].apply(strip_diacritics)
             raw_mints_gdf = raw_mints_gdf.sort_values('norm_sort').drop(columns=['norm_sort'])
@@ -149,9 +152,8 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         st.session_state.base_mints = raw_mints_gdf
         
     except Exception as e:
-        st.error(f"Error loading CSV mint data: {e}")
+        st.error(f"Error loading mint data from Google Sheets: {e}")
         st.session_state.base_mints = None
-
 
 # Fetch active baseline copies
 regions_gdf = st.session_state.base_regions.copy() if st.session_state.base_regions is not None else None
