@@ -19,6 +19,8 @@ st.set_page_config(layout="wide", page_title="Ilkhanate Mint Studio")
 st.title("🗺️ Ilkhanate Mint Map Studio")
 
 # Initialize the Google Sheets Cloud Connection Engine
+# Note: Because you are configuring [connections.gsheets] in your secrets, 
+# this will automatically authenticate.
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def strip_diacritics(text):
@@ -114,18 +116,13 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
     else:
         st.session_state.base_regions = None
 
-    # 2. Load the Mints directly from your live Google Sheet
+    # 2. Load the Mints directly from your Google Sheet
     try:
-        sheet_url = "https://docs.google.com/spreadsheets/d/1ngDmTk-E8CoafGDDxeKiNmg65w6RswOgUTsqifNexgg/edit?gid=0#gid=0"
+        sheet_url = "https://docs.google.com/spreadsheets/d/1ngDmTk-E8CoafGDDxeKiNmg65w6RswOgUTsqifNexgg/edit?usp=sharing"
         
-        # Read the first tab (gid=0) using your existing Streamlit connection
-        # ttl="10m" caches the data for 10 minutes so it doesn't drain your API quota on every click
+        # Read the sheet with a 10-minute cache to prevent hitting API rate limits
         raw_mints_df = conn.read(spreadsheet=sheet_url, ttl="10m")
         
-        # If your Category 3 mints are on a second tab, you can read and merge them like this:
-        # df2 = conn.read(spreadsheet=sheet_url, worksheet="Name_of_Second_Tab", ttl="10m")
-        # raw_mints_df = pd.concat([raw_mints_df, df2], ignore_index=True)
-
         # Standardize the unnamed column (Column B) to 'Name' to match your app's logic
         if 'Unnamed: 1' in raw_mints_df.columns:
             raw_mints_df.rename(columns={'Unnamed: 1': 'Name'}, inplace=True)
@@ -134,17 +131,19 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         if 'Number' in raw_mints_df.columns:
             raw_mints_df.rename(columns={'Number': 'Mint_Number'}, inplace=True)
             
-        # Drop rows that don't have coordinates (otherwise the map breaks)
+        # Safely convert coordinates to numbers and drop rows that don't have valid coordinates
+        raw_mints_df['° N (Latitude)'] = pd.to_numeric(raw_mints_df['° N (Latitude)'], errors='coerce')
+        raw_mints_df['° E (Longitude)'] = pd.to_numeric(raw_mints_df['° E (Longitude)'], errors='coerce')
         raw_mints_df = raw_mints_df.dropna(subset=['° N (Latitude)', '° E (Longitude)'])
         
-        # Convert the standard pandas DataFrame to a GeoDataFrame
+        # Convert to GeoDataFrame
         raw_mints_gdf = gpd.GeoDataFrame(
             raw_mints_df, 
             geometry=gpd.points_from_xy(raw_mints_df['° E (Longitude)'], raw_mints_df['° N (Latitude)']),
             crs="EPSG:4326"
         )
         
-        # Apply your baseline alphabetical sorting
+        # Apply your baseline sorting
         if not raw_mints_gdf.empty:
             raw_mints_gdf['norm_sort'] = raw_mints_gdf['Name'].apply(strip_diacritics)
             raw_mints_gdf = raw_mints_gdf.sort_values('norm_sort').drop(columns=['norm_sort'])
@@ -155,29 +154,10 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         st.error(f"Error loading mint data from Google Sheets: {e}")
         st.session_state.base_mints = None
 
+
 # Fetch active baseline copies
 regions_gdf = st.session_state.base_regions.copy() if st.session_state.base_regions is not None else None
 mints_gdf = st.session_state.base_mints.copy() if st.session_state.base_mints is not None else None
-
-# --- Live Cloud Read Connection Layer ---
-try:
-    live_custom_df = conn.read(ttl="1m")
-    if not live_custom_df.empty:
-        live_custom_df['geometry'] = live_custom_df.apply(lambda r: Point(float(r['Longitude']), float(r['Latitude'])), axis=1)
-        custom_gdf = gpd.GeoDataFrame(live_custom_df, geometry='geometry')
-        custom_gdf.set_crs(epsg=4326, inplace=True)
-        mints_gdf = pd.concat([mints_gdf, custom_gdf], ignore_index=True)
-except Exception:
-    pass
-
-# Determine global sequence indexing limits safely
-try:
-    highest_base_num = int(pd.to_numeric(st.session_state.base_mints['Mint_Number'], errors='coerce').max()) if st.session_state.base_mints is not None and not st.session_state.base_mints.empty else 0
-except Exception:
-    highest_base_num = 0
-
-highest_live_num = int(live_custom_df['Mint_Number'].max()) if 'live_custom_df' in locals() and not live_custom_df.empty else 0
-next_suggested_num = max(highest_base_num, highest_live_num) + 1
 
 # Dropdown clean alphabetical indexing helpers
 def get_sorted_dropdown_options(df):
@@ -243,39 +223,6 @@ with st.sidebar:
     region_color = st.color_picker("Region Border Color", style_preset["r_border"])
     region_fill = st.color_picker("Region Fill Color", style_preset["r_fill"])
 
-    # --- Add New Mint UI Form ---
-    st.markdown("---")
-    st.header("➕ Add New Custom Mint")
-    with st.form("mint_entry_form", clear_on_submit=True):
-        new_name = st.text_input("Mint Name (Main Header):")
-        new_arabic = st.text_input("Arabic script value:")
-        
-        region_choices = [""] + get_sorted_dropdown_options(st.session_state.base_regions)
-        new_region = st.selectbox("Assign Region Boundary:", options=region_choices)
-        
-        new_country = st.text_input("Modern Country:")
-        new_turkish = st.text_input("Turkish variant:")
-        new_lat = st.number_input("Latitude Coordinate (Y):", format="%.6f", value=34.353182)
-        new_lon = st.number_input("Longitude Coordinate (X):", format="%.6f", value=58.678751)
-        new_num = st.number_input("Assigned Static Number (Locked):", value=next_suggested_num, step=1)
-        
-        submit_mint = st.form_submit_button("Save and Inject Mint Permanent")
-        if submit_mint and new_name:
-            try:
-                current_sheet_df = conn.read()
-            except Exception:
-                current_sheet_df = pd.DataFrame()
-                
-            new_row = pd.DataFrame([{
-                'Name': new_name, 'Arabic': new_arabic, 'Region': new_region,
-                'Modern_Country': new_country, 'Turkish': new_turkish, 
-                'Latitude': float(new_lat), 'Longitude': float(new_lon), 'Mint_Number': int(new_num)
-            }])
-            
-            updated_sheet_df = pd.concat([current_sheet_df, new_row], ignore_index=True)
-            conn.update(data=updated_sheet_df)
-            st.success(f"Successfully committed '{new_name}' to cloud sheet database as Mint #{new_num}!")
-            st.rerun()
 
 # --- Main App Logic & Map Rendering ---
 if regions_gdf is not None and mints_gdf is not None:
