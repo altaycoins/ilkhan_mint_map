@@ -121,11 +121,13 @@ if 'base_regions' not in st.session_state or 'base_mints' not in st.session_stat
         # Read the sheet with a 10-minute cache to prevent hitting API rate limits
         raw_mints_df = conn.read(spreadsheet=sheet_url, ttl="10m")
         
-        # Override the primary 'Name' column with the values from 'Transliteration'
+        # Completely drop Column B (which imports as 'Unnamed: 1' because it has no header)
+        if 'Unnamed: 1' in raw_mints_df.columns:
+            raw_mints_df = raw_mints_df.drop(columns=['Unnamed: 1'])
+            
+        # Set the primary display name strictly to the Transliteration column
         if 'Transliteration' in raw_mints_df.columns:
             raw_mints_df['Name'] = raw_mints_df['Transliteration']
-        elif 'Unnamed: 1' in raw_mints_df.columns:
-            raw_mints_df.rename(columns={'Unnamed: 1': 'Name'}, inplace=True)
             
         # Map the 'Number' column to 'Mint_Number' so the rest of your app works seamlessly
         if 'Number' in raw_mints_df.columns:
@@ -273,7 +275,7 @@ if regions_gdf is not None and mints_gdf is not None:
         theme_m_txt = "#FFFFFF" if "Light" in selected_style_name else ("#101D33" if "Dark" in selected_style_name else "#FFFFFF")
         
         for _, row in mints_gdf.iterrows():
-            # Grab the name directly (without .title() to preserve exact transliteration casing like Lu'lu'a)
+            # Grab the name directly from Transliteration (preserves academic capitalization)
             m_name = str(row.get('Name_left', row.get('Name', '')))
             
             # Grab the assigned Mint_Number
@@ -291,7 +293,7 @@ if regions_gdf is not None and mints_gdf is not None:
             popup_html = f"<div style='min-width: 280px;'><h3 style='margin-bottom:8px; border-bottom: 2px solid #333; padding-bottom: 4px;'>{m_name}</h3>"
             popup_html += "<table style='width: 100%; border-collapse: collapse; font-size: 10pt;'>"
             
-            # Fields you explicitly requested to show
+            # Fields explicitly shown in the popup
             display_fields = {
                 'Number': mint_num,
                 'Region': row.get('Region', ''),
